@@ -1,7 +1,7 @@
 ---
 name: ics-protocol-analyzer
 description: |
-  工控协议通信报文解析与故障诊断工具。支持Modbus TCP/RTU、IEC 101、IEC 104、IEC 61850、S7、BACnet等常见工控协议。
+  工控协议通信报文解析与故障诊断工具。支持Modbus TCP/RTU、IEC 101、IEC 104、IEC 61850、S7、BACnet、MQTT等常见工控和物联网协议。
 
   TRIGGER 当用户需要：
   (1) 解析工控协议报文的十六进制数据
@@ -43,6 +43,7 @@ description: |
 | IEC 61850 | MMS端口102，GOOSE以太网类型0x88B8 |
 | S7 | TPKT + COTP + S7 PDU，端口102 |
 | BACnet/IP | 端口47808(0xBAC0)，BVLC头部 |
+| MQTT | 端口1883/8883，固定头部类型字段(1-15) |
 
 **识别优先级**：先检查端口号和固定字节模式，再根据格式特征确认。
 
@@ -82,6 +83,7 @@ description: |
 - **IEC 61850**: [references/iec61850.md](references/iec61850.md)
 - **S7**: [references/s7.md](references/s7.md)
 - **BACnet**: [references/bacnet.md](references/bacnet.md)
+- **MQTT**: [references/mqtt.md](references/mqtt.md)
 
 ## 4. 故障诊断
 

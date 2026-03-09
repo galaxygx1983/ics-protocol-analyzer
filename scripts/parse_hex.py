@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 工控协议报文解析工具
-支持: Modbus RTU/TCP, IEC 101/104, IEC 61850, S7, BACnet
+支持: Modbus RTU/TCP, IEC 101/104, IEC 61850, S7, BACnet, MQTT
 
 用法:
     python parse_hex.py --protocol modbus --input "01 03 00 00 00 0A C4 0B"
     python parse_hex.py --protocol iec104 --file communication.log
+    python parse_hex.py --protocol mqtt --input "10 1D 00 04 4D 51 54 54 04 C2 00 3C"
     python parse_hex.py --auto "68 04 07 00 00 00"
 """
 
@@ -26,6 +27,7 @@ class Protocol(Enum):
     IEC61850 = "iec61850"
     S7 = "s7"
     BACNET = "bacnet"
+    MQTT = "mqtt"
     AUTO = "auto"
 
 
@@ -68,6 +70,39 @@ def detect_protocol(data: bytes) -> Optional[Protocol]:
     """自动检测协议类型"""
     if len(data) < 2:
         return None
+
+    # MQTT: 检查报文类型 (1-15) 和剩余长度
+    packet_type = (data[0] >> 4) & 0x0F
+    if packet_type >= 1 and packet_type <= 15:
+        # 验证剩余长度编码
+        remaining_length = 0
+        multiplier = 1
+        idx = 1
+        valid_encoding = True
+        while idx < len(data) and idx < 5:
+            byte = data[idx]
+            remaining_length += (byte & 0x7F) * multiplier
+            multiplier *= 128
+            if (byte & 0x80) == 0:
+                break
+            idx += 1
+        else:
+            valid_encoding = idx < 4
+
+        # MQTT CONNECT 特征
+        if packet_type == 1 and len(data) >= 10:
+            # 检查协议名 "MQTT" 或 "MQIsdp"
+            pos = idx + 1
+            if pos + 2 <= len(data):
+                proto_len = (data[pos] << 8) | data[pos + 1]
+                if proto_len <= 4:
+                    proto_name = data[pos + 2:pos + 2 + proto_len]
+                    if proto_name in [b'MQTT', b'MQIsdp']:
+                        return Protocol.MQTT
+
+        # 其他MQTT报文类型
+        if packet_type in [2, 3, 12, 13, 14] and valid_encoding:
+            return Protocol.MQTT
 
     # IEC 104/101: 以68H开头
     if data[0] == 0x68:
@@ -547,6 +582,212 @@ class BACnetParser:
         )
 
 
+class MQTTParser:
+    """MQTT协议解析器"""
+
+    PACKET_TYPES = {
+        1: "CONNECT (连接请求)",
+        2: "CONNACK (连接确认)",
+        3: "PUBLISH (发布消息)",
+        4: "PUBACK (发布确认-QoS1)",
+        5: "PUBREC (发布接收-QoS2)",
+        6: "PUBREL (发布释放-QoS2)",
+        7: "PUBCOMP (发布完成-QoS2)",
+        8: "SUBSCRIBE (订阅请求)",
+        9: "SUBACK (订阅确认)",
+        10: "UNSUBSCRIBE (取消订阅)",
+        11: "UNSUBACK (取消订阅确认)",
+        12: "PINGREQ (心跳请求)",
+        13: "PINGRESP (心跳响应)",
+        14: "DISCONNECT (断开连接)",
+        15: "AUTH (认证交换)",
+    }
+
+    CONNECT_RETURN_CODES = {
+        0: "连接成功",
+        1: "不支持的协议版本",
+        2: "客户端ID无效",
+        3: "服务器不可用",
+        4: "用户名或密码错误",
+        5: "未授权",
+    }
+
+    QOS_LEVELS = {
+        0: "最多一次",
+        1: "至少一次",
+        2: "恰好一次",
+    }
+
+    @classmethod
+    def decode_remaining_length(cls, data: bytes, start: int) -> tuple:
+        """解码剩余长度字段，返回(长度值, 消耗字节数)"""
+        multiplier = 1
+        value = 0
+        index = start
+        while True:
+            if index >= len(data):
+                return (value, index - start)
+            byte = data[index]
+            value += (byte & 0x7F) * multiplier
+            multiplier *= 128
+            index += 1
+            if (byte & 0x80) == 0 or index - start >= 4:
+                break
+        return (value, index - start)
+
+    @classmethod
+    def parse(cls, data: bytes) -> ParseResult:
+        """解析MQTT报文"""
+        if len(data) < 2:
+            return ParseResult(
+                protocol="mqtt",
+                direction="unknown",
+                fields={},
+                raw_hex=bytes_to_hex(data),
+                valid=False,
+                diagnosis="报文长度不足",
+                error="长度错误"
+            )
+
+        # 固定头部
+        packet_type = (data[0] >> 4) & 0x0F
+        flags = data[0] & 0x0F
+        dup = (flags >> 3) & 0x01
+        qos = (flags >> 1) & 0x03
+        retain = flags & 0x01
+
+        remaining_length, length_bytes = cls.decode_remaining_length(data, 1)
+
+        fields = {
+            "报文类型": f"{packet_type} ({cls.PACKET_TYPES.get(packet_type, '未知')})",
+            "DUP标志": dup,
+            "QoS级别": f"{qos} ({cls.QOS_LEVELS.get(qos, '未知')})",
+            "保留标志": retain,
+            "剩余长度": remaining_length,
+        }
+
+        # 判断方向
+        direction = "unknown"
+        if packet_type in [1, 3, 8, 10, 12, 14]:  # Client→Broker
+            direction = "request"
+        elif packet_type in [2, 4, 5, 6, 7, 9, 11, 13]:  # Broker→Client
+            direction = "response"
+
+        # 解析可变头部和有效载荷
+        pos = 1 + length_bytes
+
+        if packet_type == 1:  # CONNECT
+            if len(data) >= pos + 10:
+                protocol_name_len = (data[pos] << 8) | data[pos + 1]
+                pos += 2
+                protocol_name = data[pos:pos + protocol_name_len].decode('utf-8', errors='ignore')
+                pos += protocol_name_len
+                protocol_level = data[pos]
+                pos += 1
+                connect_flags = data[pos]
+                pos += 1
+                keep_alive = (data[pos] << 8) | data[pos + 1]
+                pos += 2
+
+                fields["协议名"] = protocol_name
+                fields["协议级别"] = f"{protocol_level} (MQTT {'3.1.1' if protocol_level == 4 else '5.0' if protocol_level == 5 else '3.1'})"
+                fields["连接标志"] = f"0x{connect_flags:02X}"
+                fields["保活时间"] = f"{keep_alive}秒"
+
+                # 解析连接标志
+                user_name_flag = (connect_flags >> 7) & 0x01
+                password_flag = (connect_flags >> 6) & 0x01
+                will_retain = (connect_flags >> 5) & 0x01
+                will_qos = (connect_flags >> 3) & 0x03
+                will_flag = (connect_flags >> 2) & 0x01
+                clean_session = (connect_flags >> 1) & 0x01
+
+                fields["用户名标志"] = user_name_flag
+                fields["密码标志"] = password_flag
+                fields["遗嘱保留"] = will_retain
+                fields["遗嘱QoS"] = will_qos
+                fields["遗嘱标志"] = will_flag
+                fields["清除会话"] = clean_session
+
+                # 解析客户端ID
+                if pos + 2 <= len(data):
+                    client_id_len = (data[pos] << 8) | data[pos + 1]
+                    pos += 2
+                    if pos + client_id_len <= len(data):
+                        client_id = data[pos:pos + client_id_len].decode('utf-8', errors='ignore')
+                        fields["客户端ID"] = client_id
+
+            diagnosis = "CONNECT请求"
+
+        elif packet_type == 2:  # CONNACK
+            if len(data) >= pos + 2:
+                connack_flags = data[pos]
+                return_code = data[pos + 1]
+                fields["连接确认标志"] = connack_flags
+                fields["返回码"] = f"{return_code} ({cls.CONNECT_RETURN_CODES.get(return_code, '未知')})"
+            diagnosis = f"CONNACK: {cls.CONNECT_RETURN_CODES.get(return_code, '未知')}"
+
+        elif packet_type == 3:  # PUBLISH
+            if len(data) >= pos + 2:
+                topic_len = (data[pos] << 8) | data[pos + 1]
+                pos += 2
+                if pos + topic_len <= len(data):
+                    topic = data[pos:pos + topic_len].decode('utf-8', errors='ignore')
+                    fields["主题"] = topic
+                    pos += topic_len
+
+                    if qos > 0 and pos + 2 <= len(data):
+                        packet_id = (data[pos] << 8) | data[pos + 1]
+                        fields["报文标识"] = packet_id
+                        pos += 2
+
+                    # 有效载荷
+                    if pos < len(data):
+                        payload_len = remaining_length - (pos - 1 - length_bytes)
+                        fields["有效载荷长度"] = payload_len
+                        if payload_len <= 100:
+                            try:
+                                payload = data[pos:pos + payload_len].decode('utf-8', errors='ignore')
+                                fields["有效载荷"] = payload[:50] + "..." if len(payload) > 50 else payload
+                            except:
+                                fields["有效载荷"] = bytes_to_hex(data[pos:pos + min(payload_len, 20)])
+
+            diagnosis = f"PUBLISH: 主题={fields.get('主题', '未知')}"
+
+        elif packet_type == 12:  # PINGREQ
+            diagnosis = "心跳请求"
+
+        elif packet_type == 13:  # PINGRESP
+            diagnosis = "心跳响应"
+
+        elif packet_type == 14:  # DISCONNECT
+            diagnosis = "断开连接"
+
+        elif packet_type in [8, 10]:  # SUBSCRIBE / UNSUBSCRIBE
+            if len(data) >= pos + 2:
+                packet_id = (data[pos] << 8) | data[pos + 1]
+                fields["报文标识"] = packet_id
+            diagnosis = "SUBSCRIBE" if packet_type == 8 else "UNSUBSCRIBE"
+
+        elif packet_type in [9, 11]:  # SUBACK / UNSUBACK
+            if len(data) >= pos + 2:
+                packet_id = (data[pos] << 8) | data[pos + 1]
+                fields["报文标识"] = packet_id
+            diagnosis = "SUBACK" if packet_type == 9 else "UNSUBACK"
+
+        else:
+            diagnosis = f"MQTT {cls.PACKET_TYPES.get(packet_type, '未知报文类型')}"
+
+        return ParseResult(
+            protocol="mqtt",
+            direction=direction,
+            fields=fields,
+            raw_hex=bytes_to_hex(data),
+            valid=True,
+            diagnosis=diagnosis
+        )
+
+
 def parse_hex(hex_str: str, protocol: Protocol = Protocol.AUTO) -> ParseResult:
     """解析十六进制报文"""
     data = hex_to_bytes(hex_str)
@@ -569,6 +810,7 @@ def parse_hex(hex_str: str, protocol: Protocol = Protocol.AUTO) -> ParseResult:
         Protocol.IEC104: IEC104Parser.parse,
         Protocol.S7: S7Parser.parse,
         Protocol.BACNET: BACnetParser.parse,
+        Protocol.MQTT: MQTTParser.parse,
     }
 
     parser = parsers.get(protocol)
