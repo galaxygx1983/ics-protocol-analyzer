@@ -1,17 +1,20 @@
 ---
 name: ics-protocol-analyzer
-description: |
-  工控协议通信报文解析与故障诊断工具。支持Modbus TCP/RTU、IEC 101、IEC 104、IEC 61850、S7、BACnet、MQTT等常见工控和物联网协议。
-
-  TRIGGER 当用户需要：
-  (1) 解析工控协议报文的十六进制数据
-  (2) 分析通信日志排查故障
-  (3) 理解报文字段含义
-  (4) 诊断通信异常、超时、错误码
-  (5) 统计通信质量（响应时间、成功率等）
-
-  支持输入格式：十六进制字符串、带时间戳的日志文件
-  支持输出格式：结构化报告、JSON、Markdown表格
+description: 工控协议通信报文解析与故障诊断工具。当用户需要解析工业控制协议(ICS/SCADA)报文、分析十六进制数据、排查通信故障、诊断Modbus TCP/RTU(SLAVE地址/功能码/寄存器/CRC校验)、IEC 104/IEC 101(启动字符68H/APCI/ASDU/FT1.2帧格式)、IEC 61850(MMS/GOOSE/采样值)、西门子S7(TPKT/COTP/S7 PDU)、BACnet/IP(BVLC/NPDU/APDU)、MQTT(固定头部/可变头部/Payload)等协议通信问题、解析报文字段含义、验证CRC/LRC校验、分析请求响应对、统计通信质量(响应时间/成功率/超时)、处理通信日志文件、识别异常帧和错误码、诊断主站与从站通信故障等相关问题时使用。支持十六进制字符串、时间戳日志文件等多种输入格式，输出结构化解析报告、JSON数据或Markdown表格。
+trigger:
+  - 解析Modbus报文
+  - 分析IEC104报文
+  - 工控协议解析
+  - 十六进制报文分析
+  - Modbus TCP RTU
+  - IEC 101 104 61850
+  - S7协议解析
+  - BACnet协议
+  - MQTT报文解析
+  - 通信故障诊断
+  - CRC校验验证
+  - 从站地址查询
+  - 功能码解析
 ---
 
 # 工控协议报文分析
